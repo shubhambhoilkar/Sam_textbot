@@ -5,8 +5,7 @@ import requests
 import json
 from datetime import datetime, time
 
-
-api_key = "Your_Openai_API_KEY"
+api_key = "YOUR_OPENAI_API_KEY"
 client = OpenAI(api_key=api_key)
 
 session_store = {}
@@ -120,6 +119,54 @@ def book_appointment(user_data):
     except Exception as e:
         return False , f" Booking appointment failed with status: {response.status_code} and {response.text}"
 
+def Cancel_appointment(user_data):   #user_data
+    try:
+        headers = {
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "client_id" : CLIENT_APP_KEY,
+            "route": "cancel_appointment",
+            "user_id" : user_data.get("user_id",""),
+            "appointment_date":user_data["date"],
+            #"appointment_period":"period",
+            "appointment_time": user_data["time_slot"]
+        }
+        response = requests.post(url = API_URL, headers= headers, json = payload)
+        print("📤 Cancel API response:", response.status_code, response.text)
+        
+        if response.status_code == 200:
+            return True , "✅ Appointment cancelled successfully."
+        else:
+            return False, response.text
+    except Exception as e:
+        return False, str(e)
+
+def validate_required(data, required):
+    return [field for field in required if not data.get(field)]
+
+
+def request_call(user_data):
+    try:
+        headers= {
+            "Content-Type": "applicaton/json"
+        }
+        payload = {
+            "client_id":"44ihRG38UX24DKeFzE15FbbPZfCgz3rh",
+            "user_timezone":"Asia/Kolkata",
+            "callback_name": user_data["name"],
+            "callback_phone": user_data["phone"],
+            "callback_region": user_data["region"],
+            "route":"process_callback_data"
+        }
+        response = requests.post(url=API_URL, headers=headers, json=payload)
+        if response.status_code == 200:
+            return True, "✅ Your Call request is Confirmed. Our team will call you accordingly."
+        else:
+            return False, f"❌ Unable to book a call request. Please try once again {request_call}"
+    except Exception as e:
+        return False, str(e)
+
 
 system_prompt = {
     "role": "system",
@@ -141,6 +188,12 @@ system_prompt = {
         2. When a user selects a valid date, call tool 'fetch_periods' with parameter 'date' = user selected date in yyyy-mm-dd format. This will display available time periods (Morning, Afternoon, Evening) for given date on user's screen.
         3. When a user selects a valid time period, call tool 'fetch_timeslots' and here push the date and time_periods that was selected by user.
         4. Finally call `book_appointment` tool function by passing all this data of selected Date, time_periods and time_slots to  and ask for the Full name, Email and phone. 
+
+        **APPOINTMENT CANCELLATION WORKFLOW:**
+        1. If a user wants to cancel an appointment:
+            - Ask for the appointment `date` (YYYY-MM-DD) and exact `time`.
+            - Confirm the details with the user.
+            - Call `Cancel_appointment`.
 
         **GENERAL RULES:**
         - Use all available information from the payload before asking the user anything.
@@ -222,7 +275,23 @@ def run_conversation(user_input):
                     "required": ["name","email","phone","date","period","time_slot"],
                 }
             }
-        }
+        },
+        {
+            "type":"function",
+            "function":{
+            "name": "Cancel_appointment",
+            "description": "Cancelling the pre booked appointment",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "appointment_date": {"type": "string"},
+                    "appointment_time": {"type": "string"}
+                },
+                "required": ["appointment_date", "appointment_time"]
+                }
+            }
+        },
     ]
 
     response = client.chat.completions.create(
@@ -359,13 +428,67 @@ def run_conversation(user_input):
                 "buttons": [],
                 "messages": memory
             }
+        
+        if tool_call.function.name == "Cancel_appointment":
+            args_str = tool_call.function.arguments
+            args = json.loads(args_str)
 
+            # normalize keys
+            if "time" in args and "time_slot" not in args:
+                args["time_slot"] = args["time"]
+            if "appointment_date" in args and "date" not in args:
+                args["date"] = args["appointment_date"]
+            if "appointment_time" in args and "time_slot" not in args:
+                args["time_slot"] = args["appointment_time"]
 
+            # merge into session state
+            state["user_data"].update(args)
+            user_data = state["user_data"]
 
-    memory.append({"role": "assistant", "content": message.content})
+            required_fields = ["date", "time_slot"]
+            missing = [f for f in required_fields if f not in user_data or not user_data[f]]
+
+            if missing:
+                # ask for the next missing field
+                if "date" in missing:
+                    response_text = "Please provide the date of the appointment you want to cancel (YYYY-MM-DD)."
+                else:
+                    response_text = "Please provide the exact time of the appointment you want to cancel."
+
+                # 🔑 always append a tool response (stub)
+                memory.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps({"success": False, "message": f"Missing {', '.join(missing)}"})
+                })
+
+                return {
+                    "response": response_text,
+                    "buttons": [],
+                    "messages": memory
+                }
+
+            # ✅ Safe to cancel appointment
+            success, result = Cancel_appointment(user_data)
+
+            memory.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps({"success": success, "message": result})
+            })
+
+            return {
+                "response": f"✅ Appointment on {user_data['date']} at {user_data['time_slot']} has been cancelled.",
+                "buttons": [],
+                "messages": memory
+            }
+        
+        if tool_call.function.name == "request_call":
+            args_str = tool_call.function.arguments
+            args = json.loads(args_str)
+
     return {
-        #"response": message.content,
-        "response": message.content.strip(),
+        "response": (message.content or "" ).strip(),
         "buttons": [],
         "messages":memory
     }
@@ -373,7 +496,7 @@ def run_conversation(user_input):
 #Back up:
 while True:
     text_input = input("Enter your message: ")
-    user_input = {"user_id": "1234556", "text": text_input}
+    user_input = {"user_id": "99", "text": text_input}
     if text_input:
         data = run_conversation(user_input)
         print("Bot:", data["response"])
